@@ -90,6 +90,3 @@ python -m unittest discover -s tests -v
 ├─ requirements.txt
 └─ .gitignore
 ```
-
-교재 발췌 이미지는 계산 근거 확인을 위해 로컬에 남겨 두되, 저작권 보호를 위해 `.gitignore`에서 공개 Git 저장소 업로드 대상에서 제외합니다.
-
