@@ -5,6 +5,7 @@ from __future__ import annotations
 from matplotlib import font_manager
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Rectangle
+from matplotlib.ticker import FormatStrFormatter
 
 from .models import AnalysisResult, Beam, DoublyReinforcedBeam, SinglyReinforcedBeam, TBeam
 
@@ -55,7 +56,7 @@ def draw_section(axis, beam: Beam, korean: bool) -> None:
     axis.set_aspect("equal")
     axis.axis("off")
     title = "철근콘크리트 단면" if korean else "RC section"
-    axis.set_title(title, fontsize=13, fontweight="bold", color=COLORS["navy"], pad=12)
+    axis.set_title(title, fontsize=11, fontweight="bold", color=COLORS["navy"], pad=8)
 
     if isinstance(beam, TBeam):
         web_left = (beam.bf - beam.bw) / 2.0
@@ -69,25 +70,105 @@ def draw_section(axis, beam: Beam, korean: bool) -> None:
         count = max(1, round(beam.as_tension / 500.0))
         local = _bar_positions(count, beam.bw, y_steel)
         _draw_bars(axis, [(web_left + x, y) for x, y in local], max(5.0, beam.bw * 0.025))
-        axis.text(beam.bf / 2.0, -beam.h * 0.06, f"bf = {beam.bf:g} mm", ha="center", color=COLORS["navy"])
-        axis.text(web_left + beam.bw / 2.0, beam.h * 1.055, f"bw = {beam.bw:g} mm", ha="center", color=COLORS["navy"])
-        axis.set_xlim(-beam.bf * 0.12, beam.bf * 1.12)
-        axis.set_ylim(beam.h * 1.13, -beam.h * 0.13)
-        return
+        if beam.as_compression:
+            compression_count = max(1, round(beam.as_compression / 500.0))
+            _draw_bars(
+                axis, _bar_positions(compression_count, beam.bf, beam.d_prime),
+                max(5.0, beam.bw * 0.025),
+            )
+        width = beam.bf
+        width_label = f"bf = {beam.bf:,.2f} mm"
+        axis.text(width / 2.0, beam.h * 1.10, f"b = bw = {beam.bw:,.2f} mm", ha="center", fontsize=8, color=COLORS["navy"])
+        axis.annotate(
+            f"hf = {beam.hf:,.2f} mm", (0, beam.hf / 2.0),
+            xytext=(-width * 0.63, -beam.h * 0.075), ha="left", va="center",
+            fontsize=8, color=COLORS["navy"],
+            arrowprops={"arrowstyle": "-", "color": COLORS["navy"], "lw": 0.7},
+        )
+        footer_y = 1.23
+    else:
+        assert isinstance(beam, (SinglyReinforcedBeam, DoublyReinforcedBeam))
+        width = beam.b
+        width_label = f"b = {beam.b:,.2f} mm"
+        axis.add_patch(
+            Rectangle((0, 0), beam.b, beam.h, facecolor=COLORS["concrete"], edgecolor=COLORS["navy"], lw=1.6)
+        )
+        tension_count = max(1, round(beam.as_tension / 400.0))
+        _draw_bars(axis, _bar_positions(tension_count, beam.b, beam.d), max(4.0, beam.b * 0.025))
+        if isinstance(beam, DoublyReinforcedBeam):
+            compression_count = max(1, round(beam.as_compression / 400.0))
+            _draw_bars(axis, _bar_positions(compression_count, beam.b, beam.d_prime), max(4.0, beam.b * 0.025))
+        footer_y = 1.11
 
-    assert isinstance(beam, (SinglyReinforcedBeam, DoublyReinforcedBeam))
-    axis.add_patch(
-        Rectangle((0, 0), beam.b, beam.h, facecolor=COLORS["concrete"], edgecolor=COLORS["navy"], lw=1.6)
+    axis.text(width / 2.0, -beam.h * 0.07, width_label, ha="center", fontsize=8, color=COLORS["navy"])
+    for x, depth, label, offset in (
+        (-width * 0.34, beam.h, "h", -width * 0.12),
+        (width * 1.22, beam.d, "d", width * 0.13),
+    ):
+        axis.annotate("", (x, 0), (x, depth), arrowprops={"arrowstyle": "<->", "color": COLORS["navy"], "lw": 0.8})
+        axis.text(x + offset, depth / 2.0, f"{label} = {depth:,.2f} mm", rotation=90, ha="center", va="center", fontsize=8, color=COLORS["navy"])
+    compression_area = getattr(beam, "as_compression", 0.0)
+    compression_depth = f"{beam.d_prime:,.2f} mm" if compression_area else "—"
+    footer = (
+        f"d' = {compression_depth}",
+        f"As = {beam.as_tension:,.2f} mm²",
+        f"As' = {compression_area:,.2f} mm²",
     )
-    tension_count = max(1, round(beam.as_tension / 400.0))
-    _draw_bars(axis, _bar_positions(tension_count, beam.b, beam.d), max(4.0, beam.b * 0.025))
-    if isinstance(beam, DoublyReinforcedBeam):
-        compression_count = max(1, round(beam.as_compression / 400.0))
-        _draw_bars(axis, _bar_positions(compression_count, beam.b, beam.d_prime), max(4.0, beam.b * 0.025))
-    axis.text(beam.b / 2.0, -beam.h * 0.06, f"b = {beam.b:g} mm", ha="center", color=COLORS["navy"])
-    axis.text(beam.b * 1.06, beam.h / 2.0, f"h = {beam.h:g} mm", rotation=90, va="center", color=COLORS["navy"])
-    axis.set_xlim(-beam.b * 0.18, beam.b * 1.23)
-    axis.set_ylim(beam.h * 1.13, -beam.h * 0.13)
+    for index, label in enumerate(footer):
+        axis.text(width / 2.0, beam.h * (footer_y + index * 0.12), label, ha="center", fontsize=8, color=COLORS["navy"])
+    axis.set_xlim(-width * 0.65, width * 1.55)
+    axis.set_ylim(beam.h * (footer_y + 0.34), -beam.h * 0.17)
+
+
+def create_section_figure(beam: Beam) -> Figure:
+    """예제의 치수와 철근량을 표시하는 사이드바 단면도를 반환한다."""
+    figure = Figure(figsize=(3.4, 2.8), dpi=100, facecolor="white")
+    axis = figure.add_subplot(111)
+    draw_section(axis, beam, configure_font())
+    figure.subplots_adjust(left=0.03, right=0.97, top=0.88, bottom=0.02)
+    return figure
+
+
+def draw_bisection_curve(axis, beam: Beam, result: AnalysisResult, korean: bool) -> None:
+    """이분법에 사용한 평형식과 반올림 전 순인장변형률의 근을 표시한다."""
+    low = float(result.values["root_bracket_low"])
+    high = float(result.values["root_bracket_high"])
+    root_eps_t = float(result.values["root_eps_t"])
+    parameters = {
+        "bw": beam.reference_width,
+        "as_compression": getattr(beam, "as_compression", 0.0),
+        "d_prime": getattr(beam, "d_prime", 0.0),
+    }
+    if isinstance(beam, TBeam):
+        parameters.update(bw=beam.bw, bf=beam.bf, hf=beam.hf)
+    strains = [low + (high - low) * index / 240 for index in range(241)]
+    residuals = [beam.axial_force_residual(value, **parameters) / 1000.0 for value in strains]
+    axis.plot([value * 1000.0 for value in strains], residuals, color=COLORS["blue"], lw=2.0, label="P = Cc + Cs' - T")
+    axis.axhline(0.0, color=COLORS["steel"], lw=1.0)
+    axis.scatter(
+        [low * 1000.0, high * 1000.0], [residuals[0], residuals[-1]],
+        color=COLORS["orange"], s=35, zorder=4,
+        label="초기 탐색 구간" if korean else "Initial bracket",
+    )
+    root_residual = float(result.values["root_residual_n"]) / 1000.0
+    axis.axvline(root_eps_t * 1000.0, color=COLORS["red"], ls="--", lw=1.0)
+    axis.scatter([root_eps_t * 1000.0], [root_residual], color=COLORS["red"], edgecolor="white", s=60, zorder=5)
+    axis.annotate(
+        f"εt = {root_eps_t:.2e}\nP = {root_residual:.2e} kN",
+        (root_eps_t * 1000.0, root_residual),
+        xytext=(0.96, 0.94), textcoords="axes fraction", ha="right", va="top",
+        fontsize=9, fontweight="bold", color=COLORS["red"],
+        arrowprops={"arrowstyle": "->", "color": COLORS["red"]},
+        bbox={"boxstyle": "round,pad=0.35", "fc": "white", "ec": COLORS["red"]},
+    )
+    axis.set_title("Bisection Method", fontsize=13, fontweight="bold", color=COLORS["navy"], pad=12)
+    axis.set_xlabel(("순인장변형률 " if korean else "Tensile strain ") + r"$\varepsilon_t$ [$\times 10^{-3}$]")
+    axis.set_ylabel("축력 잔차 P [kN]" if korean else "Axial force residual P [kN]")
+    axis.xaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+    axis.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+    axis.tick_params(labelsize=8)
+    axis.grid(True, color=COLORS["grid"], lw=0.8)
+    axis.legend(loc="lower left", fontsize=8, frameon=False)
 
 
 def draw_strength_curve(axis, beam: Beam, result: AnalysisResult, korean: bool) -> None:
@@ -168,15 +249,15 @@ def draw_strength_curve(axis, beam: Beam, result: AnalysisResult, korean: bool) 
 
 
 def create_analysis_figure(beam: Beam, result: AnalysisResult | None = None) -> Figure:
-    """단면도와 강도곡선을 포함한 독립 Figure를 반환한다."""
+    """이분법 평형 그래프와 기존 강도곡선을 포함한 Figure를 반환한다."""
     korean = configure_font()
     analysis = result or beam.analyze()
     figure = Figure(figsize=(11.5, 5.5), dpi=100, facecolor="#f7fafc")
-    grid = figure.add_gridspec(1, 2, width_ratios=(0.78, 1.65), wspace=0.27)
-    section_axis = figure.add_subplot(grid[0, 0])
+    grid = figure.add_gridspec(1, 2, width_ratios=(1.0, 1.65), wspace=0.32)
+    bisection_axis = figure.add_subplot(grid[0, 0])
     curve_axis = figure.add_subplot(grid[0, 1])
-    draw_section(section_axis, beam, korean)
+    draw_bisection_curve(bisection_axis, beam, analysis, korean)
     draw_strength_curve(curve_axis, beam, analysis, korean)
-    figure.subplots_adjust(left=0.055, right=0.975, top=0.90, bottom=0.14)
+    figure.subplots_adjust(left=0.085, right=0.975, top=0.90, bottom=0.14)
     return figure
 

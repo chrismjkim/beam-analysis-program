@@ -5,7 +5,7 @@
 ## 전체 실행 흐름
 
 1. `main.py`가 실행 옵션을 판독한다.
-2. 옵션이 없으면 Tkinter GUI를 열고, `--examples`가 있으면 교재 예제를 터미널에서 실행한다.
+2. 옵션이 없으면 Tkinter GUI를 열고, `--examples`는 기존 세 예제, `--all-examples`는 추가 T형보를 포함한 다섯 예제를 실행한다.
 3. GUI 또는 예제 모듈이 `Material`과 보 객체를 생성한다.
 4. 각 보 객체의 `analyze()`가 재료·단면·철근 조건으로 강도를 계산한다.
 5. 계산 결과는 공통 `AnalysisResult` 객체로 반환된다.
@@ -26,11 +26,13 @@ Windows 터미널에서 한글, 그리스 문자, 상자 문자가 최대한 안
 다음 명령행 옵션을 정의한다.
 
 - `--examples`: GUI를 열지 않고 예제 4-2, 4-3, 4-5를 계산한다.
+- `--all-examples`: 기존 세 예제와 압축철근 유무에 따른 추가 T형보 2건을 계산한다.
+- `--doubly-t`: 복근 T형보 예제가 선택된 GUI를 바로 연다.
 - `--save-plots DIR`: 예제 결과의 Matplotlib 그래프를 지정한 디렉터리에 PNG로 저장한다.
 
 ### `run_examples()`
 
-`TEXTBOOK_EXAMPLES`의 팩토리 함수를 순회한다. 각 함수가 반환한 보 객체를 해석하고, `format_result()`로 계산 과정을 출력한다. 그래프 저장 경로가 있으면 `create_analysis_figure()`가 생성한 Figure를 PNG로 저장한다.
+기본적으로 `TEXTBOOK_EXAMPLES`의 팩토리 함수를 순회하고, `include_additional=True`이면 `ALL_EXAMPLES`를 사용한다. 각 함수가 반환한 보 객체를 해석하고, `format_result()`로 계산 과정을 출력한다. 기존 그래프 파일명은 유지하고 추가 T형보의 파일명은 팩토리 함수 이름으로 구분한다.
 
 ### `main()`
 
@@ -64,7 +66,7 @@ from beam_analysis import Material, SinglyReinforcedBeam, DoublyReinforcedBeam, 
 - `lambda_`: 일반 콘크리트 계수, `1.0`
 - `eps_y`: `fy / Es`로 계산한 철근 항복변형률
 - `eps_t_min`: `0.004`와 `2εy` 중 큰 값
-- `strength_reduction_factor()`: `εt`와 `εy`, 인장지배 한계 `0.005`를 비교하여 `0.65~0.85`의 실제 `φ` 계산. 변화구간의 `φ`는 교재 풀이 표기에 맞춰 소수 셋째 자리까지 계산에 적용한다.
+- `strength_reduction_factor()`: 반올림 전 `εt`를 `εy`, 인장지배 한계 `0.005`와 비교한다. 변화구간에서는 선형보간 후 기존대로 `φ`를 소수 셋째 자리까지 반올림하여 계산에 적용한다.
 
 `__post_init__()`는 과제에서 허용하지 않은 콘크리트 강도나 음수 재료값이 계산으로 들어오는 것을 차단한다.
 
@@ -91,6 +93,10 @@ from beam_analysis import Material, SinglyReinforcedBeam, DoublyReinforcedBeam, 
 - `reference_width`: 철근비 계산의 기준 폭
 - `strength_curve()`: 철근비 0~3% 구간에서 보 객체를 반복 생성하여 `Mn`, `φMn` 배열 계산
 - `tension_steel_depth`: `d_t` 직접 입력값을 우선 사용하고, 미입력 시 `h-60 mm` 반환
+- `_root_equilibrium()`: 직사각형 및 T형보와 압축철근의 합력을 계산하고, `P(εt)=Cc+Cs'-T=0`을 SciPy 이분법으로 해결한다. 그래프의 0% 근처와 철근 과다 구간도 포함하도록 탐색 구간을 조정한다.
+- `_root_steps()`: 근 찾기의 방법, 수렴 횟수, 반올림 전 축력 잔차를 기존 계산 리포트에 추가한다.
+
+근 탐색에는 `xtol=1e-15`, `rtol=1e-14`, `maxiter=200`을 사용한다. `values`의 `root_c_mm`, `root_a_mm`, `root_eps_t`, `root_residual_n`은 반올림 전 평형해이다. 이후 강도 계산용 반올림과 기존 키·반환형은 유지한다.
 
 `_rectangular_rho_min()`은 교재 식 (4.14)의 최소철근비를, `_rectangular_rho_max()`는 최외단 인장철근의 최소 허용변형률로부터 최대철근비를 계산한다.
 
@@ -101,8 +107,8 @@ from beam_analysis import Material, SinglyReinforcedBeam, DoublyReinforcedBeam, 
 계산 순서는 다음과 같다.
 
 1. `ρ = As/(bd)`로 인장철근비를 계산한다.
-2. 힘의 평형으로 등가응력블록 깊이 `a = As·fy/(0.85·fck·b)`를 계산한다.
-3. `c = a/β1`으로 중립축을 구한다.
+2. 공통 이분법 함수로 `Cc-T=0`을 만족하는 `εt`를 구한다.
+3. 근에서 `c`와 `a=β1c`를 구한다. `a=As·fy/(0.85·fck·b)`와 같은 평형값이다.
 4. `Mn = As·fy·(d-a/2)`로 공칭휨강도를 계산한다.
 5. `εt = εcu(d_t-c)/c`와 `0.005`를 비교하여 `φ`를 결정한다. `d_t`가 없으면 `h-60 mm`를 사용한다.
 6. `ρmin ≤ ρ ≤ ρmax`인지 확인하고, 위반하면 최종 강도를 0으로 처리한다.
@@ -113,7 +119,8 @@ from beam_analysis import Material, SinglyReinforcedBeam, DoublyReinforcedBeam, 
 
 - `effective_reinforcement_ratio()`: 최대·최소철근 검토에 사용하는 `(As-As')/(bd)` 계산
 - `_steel_stress(c)`: 변형률 적합조건으로 압축철근의 변형률과 응력을 구하고 응력을 `-fy`와 `+fy` 사이로 제한
-- `_neutral_axis()`: 콘크리트 압축력, 압축철근력, 인장철근력의 평형점이 되는 `c`를 이분법으로 탐색
+- `_equilibrium_solution()`: 단면과 압축철근 입력을 공통 이분법 함수에 전달
+- `_neutral_axis()`: 기존 인터페이스를 유지하여 공통 평형해의 `c`를 반환
 - `analyze()`: 압축철근의 항복 여부, 콘크리트 압축력 `Cc`, 철근 압축력 `Cs'`, 공칭휨강도를 계산
 
 공칭휨강도는 다음 두 저항모멘트의 합으로 계산한다.
@@ -124,13 +131,18 @@ Mn = Cc(d-a/2) + Cs'(d-d')
 
 압축철근을 2-D22 사용한 예제 4-2에서는 압축철근이 항복하고, 5-D22인 예제 4-3에서는 비항복 상태가 자동으로 선택된다.
 
+예제 4-3의 `c` 소수 첫째 자리 및 압축철근 변형률 소수 다섯째 자리 반올림을 유지한다. 리포트에 남기는 이차방정식은 독립 검산용이며, 실제 중립축은 공통 Root Finding으로 구한다. 예제 4-2는 변형률 선반올림만 수정하여 기본 해석에서 `φ=0.844`, `φMn≈454.722 kN·m`가 된다.
+
 ### `TBeam`
 
 플랜지 폭 `bf`, 복부 폭 `bw`, 플랜지 두께 `hf`를 가진 T형보를 나타낸다.
 
+기존 생성자 인수 뒤에 선택 인수 `as_compression=0.0`, `d_prime=60.0`을 추가하였다. 기존 T형보 입력은 그대로 동작한다. 압축철근이 있으면 합력, 모멘트 및 최대철근량에 반영한다.
+
 - `gross_section_properties()`: 플랜지와 복부를 두 직사각형으로 나누어 전체 도심 `ybar`, 평행축정리를 적용한 `Ig`, 인장연단 거리 `yt`를 계산
 - `cracking_moment()`: 일반 콘크리트 파괴계수 `0.63√fck`와 `Ig/yt`로 `Mcr` 계산
-- `_raw_strength()`: 등가응력블록이 플랜지 안에 있는지 복부까지 내려가는지 판정하여 공칭휨강도 계산
+- `_equilibrium_solution()`: T형 콘크리트 압축력과 압축철근력을 공통 Root Finding에 전달
+- `_raw_strength()`: 평형해의 응력블록 깊이로 플랜지·복부를 판정하고, 압축철근 모멘트를 포함해 공칭휨강도를 계산
 - `_strain_neutral_axis()`: 교재 예제처럼 응력블록 깊이 `a`를 mm 단위로 정리하여 변형률 검토용 `c=a/β1` 계산
 - `maximum_tension_area()`: 최소 허용 인장변형률에서 가능한 최대 압축응력블록과 `As,max` 계산
 - `minimum_tension_area()`: 철근량마다 `εt`로 `φ`를 계산하면서 `φMn ≥ 1.2Mcr`가 처음 만족되는 `As,min`을 이분법으로 탐색
@@ -160,7 +172,7 @@ Matplotlib Figure 안에 단면도와 철근비–휨강도 그래프를 함께 
 
 ### `draw_section()`
 
-객체 형식을 검사하여 직사각형 또는 T형 콘크리트 패치를 그리고, 철근량에 따라 철근 원을 배치한다. 복근보는 상부 압축철근과 하부 인장철근을 모두 표현한다.
+객체 형식을 검사하여 직사각형 또는 T형 콘크리트 패치를 그리고, 철근량에 따라 철근 원을 배치한다. 복근보와 압축철근이 있는 T형보는 상부 압축철근도 표현한다. 기존 단면과 강도곡선의 색상·치수·축·주석 자릿수는 유지한다.
 
 ### `draw_strength_curve()`
 
@@ -177,6 +189,8 @@ Tkinter 데스크톱 애플리케이션을 구성한다.
 ### `FIELD_SETS`
 
 보 형식별 입력 필드의 내부 이름, 화면 라벨, 기본값을 정의한다. 보 형식을 바꾸면 이 설정을 읽어 입력창을 다시 구성한다.
+
+`복근 T형보`는 별도의 선택 항목이다. 선택 시 압축철근 4-D25 예제를 불러오고 `As'`, `d'`를 포함한 입력창과 결과를 표시한다. 기본 `T형보`와 같은 계산 클래스를 사용하며 수치 계산 규칙은 동일하다.
 
 ### `BeamAnalyzerApp`
 
@@ -208,7 +222,11 @@ Tk 루트 창과 `BeamAnalyzerApp`을 만들고 이벤트 루프를 시작한다
 - `example_4_2()`: 8-D22 인장철근과 2-D22 압축철근을 가진 복근보
 - `example_4_3()`: 8-D22 인장철근과 5-D22 압축철근을 가진 복근보
 - `example_4_5()`: 8-D25 인장철근을 가진 T형보
-- `TEXTBOOK_EXAMPLES`: GUI 표시 이름과 팩토리 함수를 연결하는 사전
+- `TEXTBOOK_EXAMPLES`: 기존 세 예제의 사전으로 기존 CLI 동작 유지
+- `ADDITIONAL_EXAMPLES`: 압축철근 유무에 따른 추가 T형보 두 개의 사전
+- `ALL_EXAMPLES`: GUI 및 `--all-examples`에서 사용하는 전체 예제 사전
+
+추가 T형보 두 경우는 `h=600 mm`를 가정하며, 해당 사실을 선택 이름에도 표시한다.
 
 객체를 미리 생성하지 않고 함수로 생성하므로 GUI와 테스트가 매번 독립적인 불변 보 객체를 받는다.
 
@@ -230,6 +248,10 @@ Tk 루트 창과 `BeamAnalyzerApp`을 만들고 이벤트 루프를 시작한다
 - 최대철근비 초과 시 강도가 0인지 검사
 - T형보의 도심, `Ig`, `yt`, `Mcr` 검사
 - GUI 없이 Matplotlib Figure를 PNG 바이트로 렌더링할 수 있는지 검사
+
+### `RootFindingTests`
+
+모든 보 형식에서 SciPy 이분법을 실제로 사용하는지 확인하고, 반올림 전 내부력의 평형과 곡선 양 끝점, 강도감소계수 경계 판정, 압축철근이 있는 T형보의 강도 및 철근 표시를 검사한다.
 
 ## 유지보수 시 확인 순서
 

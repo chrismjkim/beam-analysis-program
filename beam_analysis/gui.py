@@ -3,65 +3,38 @@
 from __future__ import annotations
 
 import tkinter as tk
+from dataclasses import replace
 from tkinter import messagebox, ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
-from examples.textbook_examples import TEXTBOOK_EXAMPLES, example_4_2
+from examples.textbook_examples import ALL_EXAMPLES
 
 from .formatting import format_result
-from .models import Beam, DoublyReinforcedBeam, Material, SinglyReinforcedBeam, TBeam
-from .plotting import COLORS, create_analysis_figure
-
-
-FIELD_SETS: dict[str, tuple[tuple[str, str, float | None], ...]] = {
-    "단근 직사각형보": (
-        ("b", "보 폭 b [mm]", 300.0),
-        ("h", "전체 높이 h [mm]", 600.0),
-        ("d", "유효깊이 d [mm]", 515.0),
-        ("d_t", "최외단 깊이 dt [mm] (빈칸=h-60)", None),
-        ("as_tension", "인장철근 As [mm²]", 1800.0),
-    ),
-    "복근 직사각형보": (
-        ("b", "보 폭 b [mm]", 300.0),
-        ("h", "전체 높이 h [mm]", 600.0),
-        ("d", "유효깊이 d [mm]", 515.0),
-        ("d_t", "최외단 깊이 dt [mm] (빈칸=h-60)", None),
-        ("d_prime", "압축철근 깊이 d' [mm]", 60.0),
-        ("as_tension", "인장철근 As [mm²]", 8 * 387.1),
-        ("as_compression", "압축철근 As' [mm²]", 2 * 387.1),
-    ),
-    "T형보": (
-        ("bf", "플랜지 폭 bf [mm]", 600.0),
-        ("bw", "복부 폭 bw [mm]", 300.0),
-        ("hf", "플랜지 두께 hf [mm]", 120.0),
-        ("h", "전체 높이 h [mm]", 600.0),
-        ("d", "유효깊이 d [mm]", 510.0),
-        ("d_t", "최외단 깊이 dt [mm] (빈칸=h-60)", None),
-        ("as_tension", "인장철근 As [mm²]", 8 * 506.7),
-    ),
-}
+from .models import Beam, Material
+from .plotting import COLORS, create_analysis_figure, create_section_figure
 
 
 class BeamAnalyzerApp:
     """입력, 해석 결과, Matplotlib 그래프를 한 창에 통합한다."""
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, *, initial_example: str | None = None) -> None:
         self.root = root
-        self.root.title("RC Beam Analyzer · 철근콘크리트 보 해석")
+        self.root.title("RC Beam Analyzer · Root Finding · Bisection Method")
         self.root.geometry("1440x900")
         self.root.minsize(1120, 720)
         self.root.configure(bg="#edf3f7")
         self._maximize_window()
 
         self.material_entries: dict[str, ttk.Entry] = {}
-        self.section_entries: dict[str, ttk.Entry] = {}
+        self.selected_beam: Beam | None = None
+        self.section_canvas: FigureCanvasTkAgg | None = None
         self.figure_canvas: FigureCanvasTkAgg | None = None
         self.toolbar: NavigationToolbar2Tk | None = None
 
         self._configure_style()
         self._build_layout()
-        self.load_example("예제 4-2 (복근보, 압축철근 2-D22)")
+        self.load_example(initial_example or "예제 4-2 (복근보, 압축철근 2-D22)")
 
     def _maximize_window(self) -> None:
         """제목 표시줄과 작업 표시줄을 유지한 채 시작 창을 최대화한다."""
@@ -88,10 +61,10 @@ class BeamAnalyzerApp:
     def _build_layout(self) -> None:
         header = ttk.Frame(self.root, padding=(24, 18, 24, 10))
         header.pack(fill="x")
-        ttk.Label(header, text="RC Beam Analyzer", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(header, text="RC Beam Analyzer · Root Finding", style="Header.TLabel").pack(anchor="w")
         ttk.Label(
             header,
-            text="단근보 · 복근보 · T형보",
+            text="Bisection Method(이분법)로 축력 평형해 계산 · 단근보 · 복근보 · T형보 · 복근 T형보",
             style="Sub.TLabel",
         ).pack(anchor="w", pady=(3, 0))
 
@@ -110,7 +83,7 @@ class BeamAnalyzerApp:
         right.add(self.plot_frame, weight=3)
         right.add(result_frame, weight=2)
 
-        ttk.Label(result_frame, text="계산 리포트", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 7))
+        ttk.Label(result_frame, text="Root Finding 계산 리포트", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 7))
         text_wrap = ttk.Frame(result_frame)
         text_wrap.pack(fill="both", expand=True)
         self.output = tk.Text(
@@ -137,9 +110,9 @@ class BeamAnalyzerApp:
         ttk.Label(parent, text="해석 설정", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Separator(parent).pack(fill="x", pady=10)
 
-        ttk.Label(parent, text="교재 예제", style="Card.TLabel").pack(anchor="w")
-        self.example_var = tk.StringVar(value=next(iter(TEXTBOOK_EXAMPLES)))
-        examples = ttk.Combobox(parent, textvariable=self.example_var, state="readonly", values=list(TEXTBOOK_EXAMPLES), width=38)
+        ttk.Label(parent, text="예제", style="Card.TLabel").pack(anchor="w")
+        self.example_var = tk.StringVar(value=next(iter(ALL_EXAMPLES)))
+        examples = ttk.Combobox(parent, textvariable=self.example_var, state="readonly", values=list(ALL_EXAMPLES), width=38)
         examples.pack(fill="x", pady=(3, 6))
         examples.bind(
             "<<ComboboxSelected>>",
@@ -147,14 +120,9 @@ class BeamAnalyzerApp:
         )
 
         ttk.Separator(parent).pack(fill="x", pady=13)
-        ttk.Label(parent, text="보 형식", style="Card.TLabel").pack(anchor="w")
-        self.beam_type_var = tk.StringVar(value="복근 직사각형보")
-        beam_selector = ttk.Combobox(parent, textvariable=self.beam_type_var, state="readonly", values=list(FIELD_SETS), width=38)
-        beam_selector.pack(fill="x", pady=(3, 6))
-        beam_selector.bind("<<ComboboxSelected>>", lambda _event: self._rebuild_section_fields())
-
-        self.section_fields_frame = ttk.Frame(parent, style="Card.TFrame")
-        self.section_fields_frame.pack(fill="x", pady=(4, 0))
+        self.section_frame = ttk.Frame(parent, style="Card.TFrame", height=280)
+        self.section_frame.pack(fill="x", pady=(4, 0))
+        self.section_frame.pack_propagate(False)
 
         ttk.Separator(parent).pack(fill="x", pady=13)
         ttk.Label(parent, text="재료", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 5))
@@ -175,24 +143,9 @@ class BeamAnalyzerApp:
             "φ = εt에 따라 0.65~0.85"
         )
         ttk.Label(parent, text=note, style="Card.TLabel", justify="left").pack(anchor="w", pady=(10, 12))
-        ttk.Button(parent, text="분석 실행", style="Accent.TButton", command=self.run_analysis).pack(fill="x")
-        self.status_var = tk.StringVar(value="입력 대기")
+        ttk.Button(parent, text="Root Finding 해석 실행", style="Accent.TButton", command=self.run_analysis).pack(fill="x")
+        self.status_var = tk.StringVar(value="Root Finding 입력 대기")
         ttk.Label(parent, textvariable=self.status_var, style="Card.TLabel", wraplength=320).pack(anchor="w", pady=(9, 0))
-        self._rebuild_section_fields()
-
-    def _rebuild_section_fields(self) -> None:
-        for child in self.section_fields_frame.winfo_children():
-            child.destroy()
-        self.section_entries.clear()
-        for key, label, default in FIELD_SETS[self.beam_type_var.get()]:
-            row = ttk.Frame(self.section_fields_frame, style="Card.TFrame")
-            row.pack(fill="x", pady=3)
-            ttk.Label(row, text=label, style="Card.TLabel").pack(side="left")
-            entry = ttk.Entry(row, width=12, justify="right")
-            if default is not None:
-                entry.insert(0, f"{default:g}")
-            entry.pack(side="right")
-            self.section_entries[key] = entry
 
     def _set_entry(self, entry: ttk.Entry, value: float | None) -> None:
         entry.delete(0, "end")
@@ -200,36 +153,8 @@ class BeamAnalyzerApp:
             entry.insert(0, f"{value:g}")
 
     def load_example(self, name: str) -> None:
-        beam = TEXTBOOK_EXAMPLES[name]()
-        if isinstance(beam, DoublyReinforcedBeam):
-            beam_type = "복근 직사각형보"
-            values = {
-                "b": beam.b,
-                "h": beam.h,
-                "d": beam.d,
-                "d_t": beam.d_t,
-                "d_prime": beam.d_prime,
-                "as_tension": beam.as_tension,
-                "as_compression": beam.as_compression,
-            }
-        elif isinstance(beam, TBeam):
-            beam_type = "T형보"
-            values = {
-                "bf": beam.bf,
-                "bw": beam.bw,
-                "hf": beam.hf,
-                "h": beam.h,
-                "d": beam.d,
-                "d_t": beam.d_t,
-                "as_tension": beam.as_tension,
-            }
-        else:
-            raise TypeError("지원하지 않는 예제 형식입니다.")
-
-        self.beam_type_var.set(beam_type)
-        self._rebuild_section_fields()
-        for key, value in values.items():
-            self._set_entry(self.section_entries[key], value)
+        beam = ALL_EXAMPLES[name]()
+        self.selected_beam = beam
         self._set_entry(self.material_entries["fck"], beam.material.fck)
         self._set_entry(self.material_entries["fy"], beam.material.fy)
         self.example_var.set(name)
@@ -246,20 +171,9 @@ class BeamAnalyzerApp:
             fck=self._read_float(self.material_entries["fck"], "fck"),
             fy=self._read_float(self.material_entries["fy"], "fy"),
         )
-        values: dict[str, float | None] = {}
-        for key, entry in self.section_entries.items():
-            if key == "d_t" and not entry.get().strip():
-                values[key] = None
-            else:
-                values[key] = self._read_float(entry, key)
-        beam_type = self.beam_type_var.get()
-        if beam_type == "단근 직사각형보":
-            return SinglyReinforcedBeam(material=material, **values)
-        if beam_type == "복근 직사각형보":
-            return DoublyReinforcedBeam(material=material, **values)
-        if beam_type == "T형보":
-            return TBeam(material=material, **values)
-        raise ValueError("지원하지 않는 보 형식입니다.")
+        if self.selected_beam is None:
+            raise ValueError("해석할 예제를 선택하세요.")
+        return replace(self.selected_beam, material=material)
 
     def run_analysis(self, title: str | None = None) -> None:
         try:
@@ -277,11 +191,17 @@ class BeamAnalyzerApp:
         self.output.insert("1.0", report)
         self.output.configure(state="disabled")
         self.status_var.set(
+            f"이분법 수렴 · {float(result.values['root_iterations']):.0f}회 반복\n"
             f"{'적합' if result.valid else '부적합'} · φMn = {result.design_strength:,.2f} kN·m"
         )
         self._show_figure(beam, result)
 
     def _show_figure(self, beam: Beam, result) -> None:
+        if self.section_canvas is not None:
+            self.section_canvas.get_tk_widget().destroy()
+        self.section_canvas = FigureCanvasTkAgg(create_section_figure(beam), master=self.section_frame)
+        self.section_canvas.draw()
+        self.section_canvas.get_tk_widget().pack(fill="both", expand=True)
         if self.figure_canvas is not None:
             self.figure_canvas.get_tk_widget().destroy()
         if self.toolbar is not None:
@@ -295,8 +215,8 @@ class BeamAnalyzerApp:
         self.toolbar.pack(fill="x")
 
 
-def launch() -> None:
+def launch(*, initial_example: str | None = None) -> None:
     root = tk.Tk()
-    BeamAnalyzerApp(root)
+    BeamAnalyzerApp(root, initial_example=initial_example)
     root.mainloop()
 

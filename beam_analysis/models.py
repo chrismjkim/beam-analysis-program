@@ -2,7 +2,7 @@
 
 계산 기준
 ---------
-* 『철근콘크리트 구조설계』 8판의 보 해석 절차
+* 등가직사각형 응력블록과 변형률 적합조건
 * 일반 콘크리트(lambda = 1.0)
 * epsilon_cu = 0.0033
 * f_ck <= 40 MPa에서 beta_1 = 0.8
@@ -15,8 +15,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
-from math import sqrt
+from math import isfinite, sqrt
 from typing import Iterable
+
+from scipy.optimize import root_scalar
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +59,7 @@ class Material:
         """순인장변형률에 따른 phi와 단면의 변형률 구간을 반환한다."""
         if eps_t <= self.eps_y:
             return self.phi_min, "압축지배단면"
-        comparison_eps_t = round(eps_t, 3) if use_textbook_rounding else eps_t
-        if comparison_eps_t >= self.eps_t_tension_limit:
+        if eps_t >= self.eps_t_tension_limit:
             return self.phi, "인장지배단면"
         transition = (eps_t - self.eps_y) / (
             self.eps_t_tension_limit - self.eps_y
@@ -135,7 +136,7 @@ class Beam(ABC):
             raise ValueError(f"0보다 커야 하는 값: {', '.join(invalid)}")
 
     def _rectangular_rho_min(self) -> float:
-        """교재 식 (4.14)의 일반 콘크리트 최소철근비."""
+        """일반 콘크리트의 최소철근비."""
         material = self.material
         root_term = 1.0 - 0.432 * material.lambda_ / sqrt(material.fck)
         return (
@@ -171,6 +172,81 @@ class Beam(ABC):
     def _validate_tension_depth(self) -> None:
         if not 0 < self.tension_steel_depth < self.h:
             raise ValueError("최외단 인장철근 깊이 d_t는 0 < d_t < h여야 합니다.")
+
+    def axial_force_residual(
+        self, eps_t: float, *, bw: float, bf: float | None = None,
+        hf: float = 0.0, as_tension: float | None = None,
+        as_compression: float = 0.0, d_prime: float = 0.0,
+    ) -> float:
+        """주어진 순인장변형률에서 압축력과 인장력의 차이를 N으로 반환한다."""
+        material = self.material
+        area = self.as_tension if as_tension is None else as_tension
+        flange_width = bw if bf is None else bf
+        c = material.eps_cu * self.tension_steel_depth / (material.eps_cu + eps_t)
+        a = material.beta1 * c
+        concrete_area = bw * a + (flange_width - bw) * min(a, hf)
+        eps_prime = material.eps_cu * (c - d_prime) / c
+        fs_prime = max(-material.fy, min(material.fy, material.es * eps_prime))
+        return (0.85 * material.fck * concrete_area
+                + as_compression * fs_prime - area * material.fy)
+
+    def _root_equilibrium(
+        self, *, bw: float, bf: float | None = None, hf: float = 0.0,
+        as_tension: float | None = None, as_compression: float = 0.0,
+        d_prime: float = 0.0,
+    ) -> dict[str, float | str | bool]:
+        """세 보 형식의 축력 평형을 순인장변형률에 대한 이분법으로 푼다."""
+        material = self.material
+        area = self.as_tension if as_tension is None else as_tension
+
+        def axial_force(eps_t: float) -> float:
+            return self.axial_force_residual(
+                eps_t, bw=bw, bf=bf, hf=hf, as_tension=as_tension,
+                as_compression=as_compression, d_prime=d_prime,
+            )
+
+        high_c = max(self.h, self.d, self.tension_steel_depth)
+        low_eps = material.eps_cu * (self.tension_steel_depth / high_c - 1.0)
+        while axial_force(low_eps) < 0:
+            high_c *= 2.0
+            if high_c > self.h * 1.0e6:
+                raise ValueError("중립축을 찾을 수 없습니다. 입력값을 확인하세요.")
+            low_eps = material.eps_cu * (self.tension_steel_depth / high_c - 1.0)
+        high_eps = max(0.01, material.eps_cu)
+        for _ in range(128):
+            if axial_force(high_eps) <= 0:
+                break
+            high_eps *= 2.0
+        else:
+            raise ValueError("순인장변형률의 근 탐색 구간을 찾을 수 없습니다.")
+        solution = root_scalar(
+            axial_force, method="bisect", bracket=(low_eps, high_eps),
+            xtol=1.0e-15, rtol=1.0e-14, maxiter=200,
+        )
+        if not solution.converged:
+            raise ValueError("축력 평형의 이분법 계산이 수렴하지 않았습니다.")
+        eps_t = float(solution.root)
+        c = material.eps_cu * self.tension_steel_depth / (material.eps_cu + eps_t)
+        residual = axial_force(eps_t)
+        if not isfinite(c) or abs(residual) > max(1.0e-5, area * material.fy * 1.0e-10):
+            raise ValueError("축력 평형의 수치 오차가 허용치를 초과했습니다.")
+        iterations = 0 if eps_t in (low_eps, high_eps) else solution.iterations
+        return {
+            "root_method": "bisect", "root_converged": True,
+            "root_iterations": float(iterations), "root_residual_n": residual,
+            "root_c_mm": c, "root_a_mm": material.beta1 * c, "root_eps_t": eps_t,
+            "root_bracket_low": low_eps, "root_bracket_high": high_eps,
+        }
+
+    @staticmethod
+    def _root_steps(solution: dict[str, float | str | bool]) -> tuple[str, ...]:
+        return (
+            "Root Finding: scipy.optimize.root_scalar(method='bisect')",
+            "축력 평형식: P(epsilon_t) = C_c + C_s' - T = 0",
+            f"반올림 전 평형해: epsilon_t = {float(solution['root_eps_t']):.6f}",
+            (f"이분법 수렴: {float(solution['root_iterations']):.0f}회, "
+             f"축력 잔차 = {float(solution['root_residual_n']):.3e} N"),
+        )
 
     def _tension_strain_and_phi(
         self, c: float, *, use_textbook_rounding: bool = True
@@ -208,20 +284,10 @@ class Beam(ABC):
             ),
         ]
         if strain_region == "인장지배단면":
-            if use_textbook_rounding and eps_t < material.eps_t_tension_limit:
-                steps.extend(
-                    [
-                        f"epsilon_t 비교값 = {round(eps_t, 3):.3f} "
-                        "(소수 셋째 자리 반올림)",
-                        f"{round(eps_t, 3):.3f} >= "
-                        f"{material.eps_t_tension_limit:.3f}",
-                    ]
-                )
-            else:
-                steps.append(
-                    f"epsilon_t 비교: {eps_t:.6f} >= "
-                    f"{material.eps_t_tension_limit:.3f}"
-                )
+            steps.append(
+                f"epsilon_t 비교: {eps_t:.6f} >= "
+                f"{material.eps_t_tension_limit:.3f}"
+            )
             steps.append(f"판정 = {strain_region}")
             steps.append(f"phi = {phi:.3f}")
         elif strain_region == "압축지배단면":
@@ -283,8 +349,9 @@ class SinglyReinforcedBeam(Beam):
         rho = self.reinforcement_ratio()
         rho_min = self._rectangular_rho_min()
         rho_max = self._rectangular_rho_max(self.tension_steel_depth)
-        a = self.as_tension * material.fy / (0.85 * material.fck * self.b)
-        c = a / material.beta1
+        equilibrium = self._root_equilibrium(bw=self.b)
+        a = float(equilibrium["root_a_mm"])
+        c = float(equilibrium["root_c_mm"])
         eps_t, phi, strain_region = self._tension_strain_and_phi(
             c, use_textbook_rounding=use_textbook_rounding
         )
@@ -312,7 +379,9 @@ class SinglyReinforcedBeam(Beam):
             "phi": phi,
             "strain_region": strain_region,
         }
+        values.update(equilibrium)
         steps = [
+            *self._root_steps(equilibrium),
             f"rho = As/(bd) = {rho:.6f} ({rho * 100:.3f}%)",
             f"a = As*fy/(0.85*fck*b) = {a:.3f} mm",
             f"c = a/beta1 = {c:.3f} mm",
@@ -393,26 +462,12 @@ class DoublyReinforcedBeam(Beam):
         return eps_s, fs
 
     def _neutral_axis(self) -> float:
-        material = self.material
+        return float(self._equilibrium_solution()["root_c_mm"])
 
-        def equilibrium(c: float) -> float:
-            _, fs_prime = self._steel_stress(c)
-            concrete = 0.85 * material.fck * material.beta1 * c * self.b
-            return concrete + fs_prime * self.as_compression - self.as_tension * material.fy
-
-        low = 1.0e-9
-        high = max(self.h, self.d)
-        while equilibrium(high) < 0:
-            high *= 2.0
-            if high > self.h * 1.0e6:
-                raise ValueError("중립축을 찾을 수 없습니다. 입력값을 확인하세요.")
-        for _ in range(100):
-            mid = (low + high) / 2.0
-            if equilibrium(mid) < 0:
-                low = mid
-            else:
-                high = mid
-        return (low + high) / 2.0
+    def _equilibrium_solution(self) -> dict[str, float | str | bool]:
+        return self._root_equilibrium(
+            bw=self.b, as_compression=self.as_compression, d_prime=self.d_prime,
+        )
 
     def analyze(self, *, use_textbook_rounding: bool = True) -> AnalysisResult:
         material = self.material
@@ -422,7 +477,7 @@ class DoublyReinforcedBeam(Beam):
         rho_min = self._rectangular_rho_min()
         rho_max = self._rectangular_rho_max(self.tension_steel_depth)
 
-        # 교재 풀이 순서: 압축철근의 항복을 먼저 가정한 a를 계산한다.
+        # 압축철근의 항복을 먼저 가정한 a를 검토용으로 계산한다.
         a_assumed_yield = (
             (self.as_tension - self.as_compression)
             * material.fy
@@ -435,7 +490,8 @@ class DoublyReinforcedBeam(Beam):
             else float("inf")
         )
 
-        c = self._neutral_axis()
+        equilibrium = self._equilibrium_solution()
+        c = float(equilibrium["root_c_mm"])
         a = material.beta1 * c
         eps_t, phi, strain_region = self._tension_strain_and_phi(
             c, use_textbook_rounding=use_textbook_rounding
@@ -505,7 +561,9 @@ class DoublyReinforcedBeam(Beam):
             "cs_kn": cs * 1.0e-3,
             "compression_steel_yielded": compression_yielded,
         }
+        values.update(equilibrium)
         steps_list = [
+            *self._root_steps(equilibrium),
             f"ρ = A_s/(bd) = {rho:.6f} ({rho * 100:.3f}%)",
             f"ρ-ρ' = {rho_effective:.6f} ({rho_effective * 100:.3f}%)",
             "압축철근이 항복한다고 가정",
@@ -557,7 +615,7 @@ class DoublyReinforcedBeam(Beam):
                         f"{a_yield_limit:.2f} mm -> 압축철근 비항복, a 재계산"
                     ),
                     (
-                        "비항복 이차방정식: (0.85f_ck b)a² "
+                        "비항복 이차방정식(검산): (0.85f_ck b)a² "
                         "+ (E_s ε_cu A_s' - A_s f_y)a "
                         "- E_s ε_cu A_s' beta1 d' = 0"
                     ),
@@ -574,7 +632,7 @@ class DoublyReinforcedBeam(Beam):
         steps_list.extend(
             [
                 (
-                    f"{'교재 계산 정밀도' if use_textbook_rounding else '정밀 계산'}: "
+                    f"{'중간값 반올림' if use_textbook_rounding else '정밀 계산'}: "
                     f"ε'_s = {eps_s_for_strength:.6f}, "
                     f"f'_s = {fs_for_strength:.2f} MPa"
                     if not compression_yielded
@@ -620,6 +678,8 @@ class TBeam(Beam):
     as_tension: float
     material: Material = Material()
     d_t: float | None = None
+    as_compression: float = 0.0
+    d_prime: float = 60.0
 
     def __post_init__(self) -> None:
         self._validate_positive(
@@ -636,6 +696,10 @@ class TBeam(Beam):
             raise ValueError("복부 폭 bw는 플랜지 폭 bf보다 클 수 없습니다.")
         if not self.hf < self.d < self.h:
             raise ValueError("hf < d < h 조건을 만족해야 합니다.")
+        if self.as_compression < 0 or not isfinite(self.as_compression):
+            raise ValueError("압축철근량 As'는 유한한 0 이상의 값이어야 합니다.")
+        if self.as_compression and not 0 < self.d_prime < self.d:
+            raise ValueError("압축철근이 있으면 0 < d' < d여야 합니다.")
         self._validate_tension_depth()
 
     @property
@@ -668,13 +732,34 @@ class TBeam(Beam):
         rupture_modulus = 0.63 * self.material.lambda_ * sqrt(self.material.fck)
         return rupture_modulus * i_g / y_t * 1.0e-6
 
-    def _raw_strength(self, as_tension: float) -> tuple[float, float, str, float]:
+    def _equilibrium_solution(self, as_tension: float) -> dict[str, float | str | bool]:
+        return self._root_equilibrium(
+            bw=self.bw, bf=self.bf, hf=self.hf, as_tension=as_tension,
+            as_compression=self.as_compression, d_prime=self.d_prime,
+        )
+
+    def _compression_stress(self, c: float) -> tuple[float, float]:
+        if not self.as_compression:
+            return 0.0, 0.0
+        strain = self.material.eps_cu * (c - self.d_prime) / c
+        stress = max(-self.material.fy, min(self.material.fy, self.material.es * strain))
+        return strain, stress
+
+    def _raw_strength(
+        self, as_tension: float, *, equilibrium: dict[str, float | str | bool] | None = None,
+    ) -> tuple[float, float, str, float]:
         material = self.material
+        if as_tension <= 0:
+            return 0.0, 0.0, "플랜지 내부", 0.0
+        solution = equilibrium if equilibrium is not None else self._equilibrium_solution(as_tension)
+        a = float(solution["root_a_mm"])
+        _, fs_prime = self._compression_stress(float(solution["root_c_mm"]))
+        cs = self.as_compression * fs_prime
         tension = as_tension * material.fy
         flange_capacity = 0.85 * material.fck * self.bf * self.hf
-        if tension <= flange_capacity:
-            a = tension / (0.85 * material.fck * self.bf)
-            mn = tension * (self.d - a / 2.0) * 1.0e-6
+        if tension - cs <= flange_capacity:
+            mn = ((tension - cs) * (self.d - a / 2.0)
+                  + cs * (self.d - self.d_prime)) * 1.0e-6
             return max(0.0, mn), a, "플랜지 내부", 0.0
 
         as_flange = (
@@ -684,11 +769,11 @@ class TBeam(Beam):
             * self.hf
             / material.fy
         )
-        as_web = as_tension - as_flange
-        a = as_web * material.fy / (0.85 * material.fck * self.bw)
+        as_web = as_tension - as_flange - cs / material.fy
         mn_flange = as_flange * material.fy * (self.d - self.hf / 2.0)
         mn_web = as_web * material.fy * (self.d - a / 2.0)
-        return max(0.0, (mn_flange + mn_web) * 1.0e-6), a, "복부 내부", as_flange
+        mn_compression = cs * (self.d - self.d_prime)
+        return max(0.0, (mn_flange + mn_web + mn_compression) * 1.0e-6), a, "복부 내부", as_flange
 
     def maximum_tension_area(self) -> float:
         material = self.material
@@ -701,7 +786,9 @@ class TBeam(Beam):
         compression_area = self.bf * min(a_max, self.hf)
         if a_max > self.hf:
             compression_area += self.bw * (a_max - self.hf)
-        return 0.85 * material.fck * compression_area / material.fy
+        _, fs_prime = self._compression_stress(c_max)
+        return (0.85 * material.fck * compression_area
+                + self.as_compression * fs_prime) / material.fy
 
     def minimum_tension_area(self, *, use_textbook_rounding: bool = True) -> float:
         """실제 T 총단면 Ig로 계산한 1.2Mcr 조건의 최소 철근량."""
@@ -740,7 +827,7 @@ class TBeam(Beam):
     def _strain_neutral_axis(
         self, a: float, *, use_textbook_rounding: bool = True
     ) -> float:
-        """리포트는 교재 중간값, 그래프는 원시 a로 중립축 깊이를 구한다."""
+        """리포트는 중간값 반올림, 그래프는 원시 a로 중립축 깊이를 구한다."""
         a_for_strain = round(a) if use_textbook_rounding else a
         return a_for_strain / self.material.beta1
 
@@ -753,7 +840,10 @@ class TBeam(Beam):
         as_max = self.maximum_tension_area()
         rho_min = as_min / (self.bw * self.d)
         rho_max = as_max / (self.bw * self.d)
-        raw_mn, a, neutral_axis_location, as_flange = self._raw_strength(self.as_tension)
+        equilibrium = self._equilibrium_solution(self.as_tension)
+        raw_mn, a, neutral_axis_location, as_flange = self._raw_strength(
+            self.as_tension, equilibrium=equilibrium,
+        )
         a_for_strain = round(a) if use_textbook_rounding else a
         c = self._strain_neutral_axis(
             a, use_textbook_rounding=use_textbook_rounding
@@ -794,12 +884,21 @@ class TBeam(Beam):
             "mcr_knm": m_cr,
             "minimum_required_design_strength_knm": 1.2 * m_cr,
         }
+        values.update(equilibrium)
+        if self.as_compression:
+            eps_prime, fs_prime = self._compression_stress(float(equilibrium["root_c_mm"]))
+            values.update({
+                "eps_s_prime": eps_prime, "fs_prime_mpa": fs_prime,
+                "cs_kn": self.as_compression * fs_prime * 1.0e-3,
+                "compression_steel_yielded": abs(fs_prime - material.fy) < 1.0e-6,
+            })
         a_for_strain_text = (
             f"{a_for_strain:.0f}"
             if use_textbook_rounding
             else f"{a_for_strain:.3f}"
         )
         steps = [
+            *self._root_steps(equilibrium),
             f"T 총단면 도심 ybar = {y_bar:.3f} mm",
             f"Ig = {i_g:,.3f} mm^4, yt = {y_t:.3f} mm",
             f"Mcr = 0.63*sqrt(fck)*Ig/yt = {m_cr:.3f} kN·m",
@@ -810,6 +909,11 @@ class TBeam(Beam):
             f"c = a/beta1 = {a_for_strain_text}/{material.beta1:g} = {c:.3f} mm",
             f"Mn = {raw_mn:.3f} kN·m",
         ]
+        if self.as_compression:
+            steps.append(
+                f"압축철근: ε'_s = {eps_prime:.6f}, f'_s = {fs_prime:.2f} MPa, "
+                f"C_s' = {self.as_compression * fs_prime * 1.0e-3:.2f} kN"
+            )
         steps.extend(
             self._strength_reduction_steps(
                 c,
@@ -821,7 +925,7 @@ class TBeam(Beam):
         )
         steps.append(f"phi*Mn = {phi:.3f}*Mn = {raw_phi_mn:.3f} kN·m")
         return AnalysisResult(
-            "T형보",
+            "복근 T형보" if self.as_compression else "T형보",
             mn,
             phi_mn,
             raw_mn,

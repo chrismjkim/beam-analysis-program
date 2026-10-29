@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from beam_analysis.formatting import format_result
-from examples.textbook_examples import TEXTBOOK_EXAMPLES
+from examples.textbook_examples import ALL_EXAMPLES, DOUBLY_T_EXAMPLE, TEXTBOOK_EXAMPLES
 
 
 def _configure_console() -> None:
@@ -19,14 +19,15 @@ def _configure_console() -> None:
             except (AttributeError, OSError):
                 pass
 
-def run_examples(save_directory: Path | None = None) -> int:
+def run_examples(save_directory: Path | None = None, *, include_additional: bool = False) -> int:
     if save_directory is not None:
         save_directory.mkdir(parents=True, exist_ok=True)
         from matplotlib.backends.backend_agg import FigureCanvasAgg
 
         from beam_analysis.plotting import create_analysis_figure
 
-    for index, (name, factory) in enumerate(TEXTBOOK_EXAMPLES.items(), start=1):
+    examples = ALL_EXAMPLES if include_additional else TEXTBOOK_EXAMPLES
+    for index, (name, factory) in enumerate(examples.items(), start=1):
         beam = factory()
         result = beam.analyze()
         if index > 1:
@@ -35,8 +36,11 @@ def run_examples(save_directory: Path | None = None) -> int:
         if save_directory is not None:
             figure = create_analysis_figure(beam, result)
             FigureCanvasAgg(figure)
-            example_number = name.split()[1].replace("-", "_")
-            target = save_directory / f"example_{example_number}.png"
+            if name.startswith("예제 "):
+                example_number = name.split()[1].replace("-", "_")
+                target = save_directory / f"example_{example_number}.png"
+            else:
+                target = save_directory / f"{factory.__name__}.png"
             figure.savefig(target, dpi=180, bbox_inches="tight")
             print(f"그래프 저장: {target}")
     return 0
@@ -52,6 +56,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="GUI 대신 교재 예제 4-2, 4-3, 4-5 결과를 터미널에 출력",
     )
     parser.add_argument(
+        "--all-examples",
+        action="store_true",
+        help="기존 세 예제와 압축철근 유무에 따른 추가 T형보 2건을 실행",
+    )
+    parser.add_argument(
+        "--doubly-t",
+        action="store_true",
+        help="복근 T형보 예제가 선택된 GUI를 바로 실행",
+    )
+    parser.add_argument(
         "--save-plots",
         type=Path,
         metavar="DIR",
@@ -63,11 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     _configure_console()
     args = build_parser().parse_args(argv)
-    if args.examples or args.save_plots is not None:
+    if args.examples or args.all_examples or args.save_plots is not None:
         try:
-            return run_examples(args.save_plots)
+            return run_examples(args.save_plots, include_additional=args.all_examples)
         except ImportError as error:
-            print("그래프 생성에 필요한 Matplotlib을 불러오지 못했습니다.", file=sys.stderr)
+            print("해석·그래프에 필요한 SciPy 또는 Matplotlib을 불러오지 못했습니다.", file=sys.stderr)
             print("python -m pip install -r requirements.txt", file=sys.stderr)
             print(f"상세 오류: {error}", file=sys.stderr)
             return 1
@@ -75,7 +89,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from beam_analysis.gui import launch
 
-        launch()
+        if args.doubly_t:
+            launch(initial_example=DOUBLY_T_EXAMPLE)
+        else:
+            launch()
     except ImportError as error:
         print("GUI 실행에 필요한 모듈을 불러오지 못했습니다.", file=sys.stderr)
         print("python -m pip install -r requirements.txt", file=sys.stderr)

@@ -59,6 +59,17 @@ def format_result(beam: Beam, result: AnalysisResult, title: str | None = None) 
         f"│{_pad('RC BEAM ANALYZER · ' + heading, width, 'center')}│",
         "├" + "─" * width + "┤",
     ]
+    if result.values.get("root_method") == "bisect":
+        lines.extend(_rows("해석 방법", "Root Finding · Bisection Method(이분법)", width))
+        convergence = "수렴" if result.values.get("root_converged") else "미수렴"
+        lines.extend(
+            _rows(
+                "평형해 수렴",
+                f"{convergence} · {float(result.values['root_iterations']):.0f}회 반복 · "
+                f"|P| = {abs(float(result.values['root_residual_n'])):.2e} N",
+                width,
+            )
+        )
     lines.extend(_rows("해석 모델", result.beam_type, width))
     lines.extend(_rows("판정", "적합" if result.valid else "부적합 — 강도 0 처리", width))
     lines.extend(_rows("공칭휨강도 Mn", f"{result.nominal_strength:,.3f} kN·m", width))
